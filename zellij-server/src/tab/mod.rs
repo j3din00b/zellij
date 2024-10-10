@@ -2312,19 +2312,20 @@ impl Tab {
     }
     pub fn resize(&mut self, client_id: ClientId, strategy: ResizeStrategy) -> Result<()> {
         let err_context = || format!("unable to resize pane");
-        self.swap_layouts.set_is_floating_damaged();
-        self.swap_layouts.set_is_tiled_damaged();
         if self.floating_panes.panes_are_visible() {
             let successfully_resized = self
                 .floating_panes
                 .resize_active_pane(client_id, &mut self.os_api, &strategy)
                 .with_context(err_context)?;
             if successfully_resized {
+                self.swap_layouts.set_is_floating_damaged();
                 self.set_force_render(); // we force render here to make sure the panes under the floating pane render and don't leave "garbage" in case of a decrease
             }
         } else {
             match self.tiled_panes.resize_active_pane(client_id, &strategy) {
-                Ok(_) => {},
+                Ok(_) => {
+                    self.swap_layouts.set_is_tiled_damaged();
+                },
                 Err(err) => match err.downcast_ref::<ZellijError>() {
                     Some(ZellijError::CantResizeFixedPanes { pane_ids }) => {
                         let mut pane_ids_to_error = vec![];
@@ -2342,7 +2343,7 @@ impl Tab {
                             ))
                             .with_context(err_context)?;
                     },
-                    _ => Err::<(), _>(err).fatal(),
+                    _ => Err::<(), _>(err).non_fatal(),
                 },
             }
         }
@@ -3835,24 +3836,19 @@ impl Tab {
         let err_context =
             || format!("failed to update name of active pane to '{buf:?}' for client {client_id}");
 
-        if let Some(active_terminal_id) = self.get_active_terminal_id(client_id) {
-            let active_terminal = if self.are_floating_panes_visible() {
-                self.floating_panes
-                    .get_pane_mut(PaneId::Terminal(active_terminal_id))
-            } else {
-                self.tiled_panes
-                    .get_pane_mut(PaneId::Terminal(active_terminal_id))
-            }
-            .with_context(err_context)?;
-
-            // It only allows printable unicode, delete and backspace keys.
-            let is_updatable = buf
-                .iter()
-                .all(|u| matches!(u, 0x20..=0x7E | 0xA0..=0xFF | 0x08 | 0x7F));
-            if is_updatable {
-                let s = str::from_utf8(&buf).with_context(err_context)?;
-                active_terminal.update_name(s);
-            }
+        // Only allow printable unicode, delete and backspace keys.
+        let is_updatable = buf
+            .iter()
+            .all(|u| matches!(u, 0x20..=0x7E | 0xA0..=0xFF | 0x08 | 0x7F));
+        if is_updatable {
+            let s = str::from_utf8(&buf).with_context(err_context)?;
+            self.get_active_pane_mut(client_id)
+                .with_context(|| format!("no active pane found for client {client_id}"))
+                .map(|active_pane| {
+                    active_pane.update_name(s);
+                })?;
+        } else {
+            log::error!("Failed to update pane name due to unprintable characters");
         }
         Ok(())
     }
@@ -4315,7 +4311,7 @@ impl Tab {
                             ))
                             .with_context(err_context)?;
                     },
-                    _ => Err::<(), _>(err).fatal(),
+                    _ => Err::<(), _>(err).non_fatal(),
                 },
             }
         } else if self
